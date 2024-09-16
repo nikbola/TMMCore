@@ -6,6 +6,8 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Collections.Generic;
 using UnityEngine;
+using TMMCore.Types;
+using Newtonsoft.Json;
 
 namespace TMMCore
 {
@@ -29,7 +31,26 @@ namespace TMMCore
             action.modName = callingAssembly;
             _uiActionDict.Add(id, action);
 
-            _ipcQueue.Enqueue($"Action registered by {callingAssembly} with ID {id}.");
+            var ipcPayload = new IPCPayload();
+            ipcPayload.label = action.label;
+            ipcPayload.id = id;
+            ipcPayload.modName = action.modName;
+
+            if (action is ButtonAction)
+                ipcPayload.actionType = ActionType.Button;
+            else if (action is ToggleAction)
+                ipcPayload.actionType = ActionType.Toggle;
+            else if (action is SliderAction slider)
+            {
+                ipcPayload.actionType = ActionType.Slider;
+                ipcPayload.min = slider.min;
+                ipcPayload.max = slider.max;
+            }
+            string jsonPayload = JsonConvert.SerializeObject(ipcPayload);
+            
+            //_instance.Logger.LogInfo(callingAssembly + " registered " + nameof(UIElements) + " of type \"" + ipcPayload.actionType + "\"");
+
+            _ipcQueue.Enqueue(jsonPayload);
         }
 
         private void Awake()

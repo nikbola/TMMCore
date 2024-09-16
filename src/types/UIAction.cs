@@ -1,6 +1,6 @@
 using System;
 
-namespace TMMCore
+namespace TMMCore.Types
 {
     internal abstract class UIAction
     {
