@@ -15,15 +15,18 @@ namespace TMMCore
     internal class Plugin : BaseUnityPlugin
     {
         private static Plugin _instance;
-
         private static Dictionary<string, UIAction> _uiActionDict = new Dictionary<string, UIAction>();
         private static Queue<Action> _logQueue = new Queue<Action>();
-        private static Queue<string> _ipcQueue = new Queue<string>();
+        private static List<string> _pendingMessages = new List<string>();
         private Thread _serverThread;
         private TcpClient _client;
         private NetworkStream _stream;
-
         internal static Plugin Get() => _instance;
+
+        internal bool IsClientConnected()
+        {
+            return _client != null && _client.Connected;
+        }
 
         internal static void RegisterUIAction(string callingAssembly, UIAction action)
         {
@@ -47,14 +50,19 @@ namespace TMMCore
                 ipcPayload.max = slider.max;
             }
             string jsonPayload = JsonConvert.SerializeObject(ipcPayload);
-            
-            //_instance.Logger.LogInfo(callingAssembly + " registered " + nameof(UIElements) + " of type \"" + ipcPayload.actionType + "\"");
 
-            _ipcQueue.Enqueue(jsonPayload);
+            _pendingMessages.Add(jsonPayload);
+
+            if (_instance.IsClientConnected())
+            {
+                _instance.SendMessageToElectron(jsonPayload);
+            }
         }
 
         private void Awake()
         {
+            _instance = this;
+
             Logger.LogInfo("Plugin started");
             Logger.LogInfo("Running TCP server");
 
@@ -63,16 +71,28 @@ namespace TMMCore
             _serverThread.Start();
         }
 
+        private void Start()
+        {
+            UIElements.Button("Test Button", onClick: () =>
+            {
+                Logger.LogInfo("Clicked Button!");
+            });
+
+            UIElements.Slider(label: "Test Slider", min: 0, max: 100, onValueChanged: (value) =>
+            {
+                Logger.LogInfo("Slider value: " + value);
+            });
+
+            UIElements.Toggle(label: "Test Toggle", onValueChanged: (bool value) =>
+            {
+                Logger.LogInfo("Toggle value: " + value);
+            });
+        }
+
         private void Update()
         {
             while (_logQueue.Count > 0)
                 _logQueue.Dequeue()?.Invoke();
-
-            while (_ipcQueue.Count > 0 && _client != null && _client.Connected)
-            {
-                string messageToSend = _ipcQueue.Dequeue();
-                SendMessageToElectron(messageToSend);
-            }
 
             if (Input.GetKeyDown(KeyCode.L))
             {
@@ -111,6 +131,16 @@ namespace TMMCore
         {
             TcpClient client = (TcpClient)clientObj;
             NetworkStream stream = client.GetStream();
+            _client = client;
+            _stream = stream;
+
+            lock (_pendingMessages)
+            {
+                foreach (string message in _pendingMessages)
+                {
+                    SendMessageToElectron(message);
+                }
+            }
 
             byte[] buffer = new byte[1024];
             int bytesRead;
@@ -120,13 +150,25 @@ namespace TMMCore
                 while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) != 0)
                 {
                     string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    _logQueue.Enqueue(() =>
-                    {
-                        Logger.LogInfo("Received from Electron: " + message);
-                    });
 
-                    byte[] response = Encoding.UTF8.GetBytes("Message received: " + message);
-                    stream.Write(response, 0, response.Length);
+                    var response = JsonConvert.DeserializeObject<IPCResponsePayload>(message);
+                    if (_uiActionDict.TryGetValue(response.id, out UIAction action))
+                    {
+                        switch (response.type)
+                        {
+                            case ActionType.Slider:
+                                (action as SliderAction).onValueChanged?.Invoke(response.sliderValue);
+                                break;
+                            case ActionType.Toggle:
+                                (action as ToggleAction).onValueChanged?.Invoke(response.toggleValue);
+                                break;
+                            case ActionType.Button:
+                                (action as ButtonAction).onClick?.Invoke();
+                                break;
+                            default:
+                                break;
+                        }
+                    }
                 }
             }
             catch (Exception ex)
@@ -139,6 +181,7 @@ namespace TMMCore
             finally
             {
                 client.Close();
+                _client = null;
                 _logQueue.Enqueue(() =>
                 {
                     Logger.LogInfo("Client disconnected.");
@@ -148,7 +191,7 @@ namespace TMMCore
 
         private void SendMessageToElectron(string message)
         {
-            if (_stream != null && _client.Connected)
+            if (_stream != null && _client != null && _client.Connected)
             {
                 try
                 {
